@@ -1,0 +1,133 @@
+<div id="colab-audio-recorder" style="font-family: sans-serif; padding: 8px 0;">
+  <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+    <button id="record-btn" style="padding: 6px 10px;">Start recording</button>
+    <button id="stop-btn" style="padding: 6px 10px;" disabled>Stop</button>
+    <span id="status" style="opacity: 0.85;">Idle</span>
+  </div>
+
+  <audio id="recorded-audio" controls style="margin-top: 10px; width: 100%;"></audio>
+
+  <!-- Used by Python (wait_for_audio_complete) to detect playback completion -->
+  <span id="audio-complete-flag" style="display: none;"></span>
+</div>
+
+<script>
+(() => {
+  // If the cell is re-run and multiple UIs exist, keep only the latest one.
+  const all = Array.from(document.querySelectorAll('#colab-audio-recorder'));
+  if (all.length > 1) {
+    for (let i = 0; i < all.length - 1; i++) all[i].remove();
+  }
+
+  const container = document.querySelector('#colab-audio-recorder');
+  if (!container) return;
+
+  const recordBtn = container.querySelector('#record-btn');
+  const stopBtn = container.querySelector('#stop-btn');
+  const statusEl = container.querySelector('#status');
+  const audioEl = container.querySelector('#recorded-audio');
+  const flagEl = container.querySelector('#audio-complete-flag');
+
+  let mediaRecorder = null;
+  let chunks = [];
+  let stream = null;
+
+  const setStatus = (text) => { statusEl.textContent = text; };
+
+  // Create a fresh Promise that Colab's eval_js can await.
+  window._colabRecordingPromise = new Promise((resolve) => {
+    window._resolveColabRecordingPromise = resolve;
+  });
+
+  const resolveOnce = (value) => {
+    if (typeof window._resolveColabRecordingPromise === 'function') {
+      const r = window._resolveColabRecordingPromise;
+      window._resolveColabRecordingPromise = null;
+      r(value);
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      setStatus('Requesting microphone…');
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      chunks = [];
+      try {
+        mediaRecorder = new MediaRecorder(stream);
+      } catch (e) {
+        // Older browsers may fail; resolve to avoid deadlock.
+        console.error('MediaRecorder error:', e);
+        setStatus('Recording not supported in this browser');
+        resolveOnce('');
+        return;
+      }
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+
+      mediaRecorder.onstop = () => {
+        try {
+          if (stream) stream.getTracks().forEach((t) => t.stop());
+        } catch (_) {}
+
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const dataUrl = reader.result;
+          audioEl.src = dataUrl;
+          setStatus('Recorded');
+          resolveOnce(dataUrl);
+          recordBtn.disabled = false;
+          stopBtn.disabled = true;
+        };
+        reader.readAsDataURL(blob);
+      };
+
+      mediaRecorder.start();
+      setStatus('Recording…');
+      recordBtn.disabled = true;
+      stopBtn.disabled = false;
+    } catch (e) {
+      console.error('Microphone permission error:', e);
+      setStatus('Microphone permission denied/unavailable');
+      recordBtn.disabled = false;
+      stopBtn.disabled = true;
+      resolveOnce('');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      setStatus('Stopping…');
+      mediaRecorder.stop();
+    }
+  };
+
+  recordBtn.onclick = startRecording;
+  stopBtn.onclick = stopRecording;
+
+  // Used by Python to play TTS audio and wait for completion.
+  window.playAudioResponse = function (dataUri) {
+    try { flagEl.textContent = ''; } catch (_) {}
+
+    // Stop any previous playback.
+    if (window._lastResponseAudio) {
+      try { window._lastResponseAudio.pause(); } catch (_) {}
+      window._lastResponseAudio = null;
+    }
+
+    const a = new Audio(dataUri);
+    window._lastResponseAudio = a;
+
+    a.onended = () => { try { flagEl.textContent = 'complete'; } catch (_) {} };
+    a.onerror = () => { try { flagEl.textContent = 'error'; } catch (_) {} };
+
+    a.play().catch((e) => {
+      console.error('Audio play error:', e);
+      try { flagEl.textContent = 'error'; } catch (_) {}
+    });
+  };
+})();
+</script>
